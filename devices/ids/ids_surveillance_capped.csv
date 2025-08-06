@@ -1,0 +1,21 @@
+Device ID,Battery Capacity (mAh),Battery State (%),ML Model,Connectivity (Mbps),Memory (MB),Dataset Size (samples),Data Type
+IDS-01,4654,91,Autoencoder,1.0,1000,18238,Access Logs
+IDS-02,3001,39,GNN,1.0,1000,11610,Thermal Imaging
+IDS-03,803,49,SVM,1.0,1000,8199,Access Logs
+IDS-04,2751,19,1D-CNN,1.0,1000,15151,Access Logs
+IDS-05,2087,50,1D-CNN,1.0,1000,18486,Video Frame Features
+IDS-06,2447,91,Autoencoder,1.0,1000,18600,Face Embeddings
+IDS-07,1755,88,GNN,1.0,344,17030,Thermal Imaging
+IDS-08,4845,47,Autoencoder,1.0,553,7634,Video Frame Features
+IDS-09,4485,90,Autoencoder,1.0,1000,19018,Face Embeddings
+IDS-10,4501,65,Autoencoder,1.0,1000,10499,Face Embeddings
+IDS-11,4254,35,Isolation Forest,1.0,1000,11834,Motion Sensor Logs
+IDS-12,2668,98,1D-CNN,1.0,1000,9553,Face Embeddings
+IDS-13,3753,22,Isolation Forest,1.0,1000,2005,Motion Sensor Logs
+IDS-14,2167,18,CNN-LSTM,1.0,740,3292,Face Embeddings
+IDS-15,2846,100,CNN-LSTM,1.0,1000,7186,Thermal Imaging
+IDS-16,3240,83,Autoencoder,1.0,1000,2398,Video Frame Features
+IDS-17,1329,76,Autoencoder,1.0,996,17061,Motion Sensor Logs
+IDS-18,4870,34,1D-CNN,1.0,1000,10125,Motion Sensor Logs
+IDS-19,3984,16,SVM,1.0,1000,15443,Motion Sensor Logs
+IDS-20,2110,91,CNN-LSTM,1.0,1000,16595,Access Logs

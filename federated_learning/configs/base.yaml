@@ -1,0 +1,22 @@
+# This is a configuration file for a federated learning experiment.
+config:
+  num_rounds: 3
+  num_clients: 10 # total number of clients
+  num_clients_per_round_fit: 5 # number of clients per round of local training
+  num_clients_per_round_eval: 5 # number of clients per round of local evaluation
+  num_class: 10
+  num_feature: 784
+  batch_size: 32
+  learning_rate: 0.01
+  momentum: 0.9
+  weight_decay: 0.0001
+  local_epochs: 1
+  local_batch_size: 32
+  local_lr: 0.01
+  local_momentum: 0.9
+  local_weight_decay: 0.0001
+  global_epoch: 1
+  global_batch_size: 32
+  global_lr: 0.01
+  global_momentum: 0.9
+  global_weight_decay: 0.0001

@@ -1,0 +1,21 @@
+Device ID,Battery Capacity (mAh),Battery State (%),ML Model,Connectivity (Mbps),Memory (MB),Dataset Size (samples),Data Type
+HW-01,4210,72,Random Forest,9.28,2906,5557,Gyroscope
+HW-02,2661,80,Autoencoder,13.41,3035,3931,ECG
+HW-03,1292,11,CNN,8.45,3563,7516,Heart Rate
+HW-04,4279,16,CNN,1.78,2574,3338,Gyroscope
+HW-05,1032,61,LSTM,12.24,782,8570,Gyroscope
+HW-06,4294,58,Logistic Regression,3.79,2703,11554,Heart Rate
+HW-07,4358,74,Autoencoder,18.28,573,10266,Gyroscope
+HW-08,3663,26,CNN,14.74,2789,16547,Accelerometer
+HW-09,2838,91,Random Forest,11.46,3791,11780,Heart Rate
+HW-10,3909,17,Autoencoder,5.11,892,15989,Heart Rate
+HW-11,3573,52,LSTM,6.35,1808,5533,PPG
+HW-12,4660,90,Random Forest,15.99,3819,16687,ECG
+HW-13,1309,11,LSTM,8.28,1595,3544,Accelerometer
+HW-14,1768,86,Logistic Regression,16.29,4049,7829,PPG
+HW-15,2390,23,Logistic Regression,17.52,3136,12520,Accelerometer
+HW-16,4465,71,Autoencoder,8.61,2818,14700,Accelerometer
+HW-17,2824,86,Random Forest,14.3,725,17557,Gyroscope
+HW-18,3591,92,Random Forest,19.61,3737,6309,Heart Rate
+HW-19,4726,43,Transformer,16.11,3806,14541,Accelerometer
+HW-20,2246,67,LSTM,8.15,1774,14089,Gyroscope
