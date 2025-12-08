@@ -13,6 +13,7 @@ import seaborn as sns
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import precision_recall_fscore_support
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, MinMaxScaler, OneHotEncoder
 import time
 import torch
 from torchvision.models import mobilenet_v2, resnet18
@@ -21,6 +22,8 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 from tqdm import tqdm
 from typing import Dict, List, Tuple
+
+random.seed(42)
 
 
 # %%
@@ -338,6 +341,8 @@ class IoTDevice:
         location: Tuple[float, float] = (0.0, 0.0),
         model_type="cnn",
         optimizer_type="adam",
+        dataset_name="MNIST",
+        model=FashionMNISTWithConv(),
     ):
         self.id = id
         self.device_type = device_type
@@ -384,7 +389,8 @@ class IoTDevice:
         # Model and Private Dataset
         self.model_type = model_type
         self.optimizer_type = optimizer_type
-        self.model = self.get_model()
+        self.dataset_name = dataset_name
+        self.model = model
         self.local_epochs = 1  # Lightweight: 1-2 epochs per round
         self.data_quality = random.uniform(0.5, 1.0)
         self.train_dataset = None
@@ -477,7 +483,10 @@ class IoTDevice:
     def can_participate(self) -> bool:
         """Check if device can participate in training"""
         # Basic resource checks
-        battery_ok = self.battery.current_level > 15  # Increased threshold
+        battery_ok = (
+            self.battery.current_level > 15
+            or self.battery.current_capacity - self.E_cost < self.E_cost
+        )  # Increased threshold
         memory_ok = (self.memory.free_ram / self.memory.total_ram) > 0.2
         network_ok = self.bandwidth.connection_stability > 0.6
         health_ok = self.health.failure_probability < 0.7
@@ -526,25 +535,6 @@ class IoTDevice:
         )
         entropy = -np.sum(probs * np.log(probs + 1e-10))
         self.data_quality = entropy / np.log(10)  # Norm to [0,1]
-
-    def get_model(self):
-        if self.model_type == "cnn":
-            return FashionMNISTWithConv()
-        elif self.model_type == "mobilenet":
-            model = mobilenet_v2(num_classes=10, pretrained=False)
-            model.features[0][0] = nn.Conv2d(
-                1, 32, kernel_size=3, stride=2, padding=1, bias=False
-            )  # Grayscale adjust
-            return model
-        elif self.model_type == "resnet18":
-            model = resnet18(num_classes=10, pretrained=False)
-            model.conv1 = nn.Conv2d(
-                1, 64, kernel_size=7, stride=2, padding=3, bias=False
-            )  # Grayscale
-            return model
-        # Add more (e.g., 'efficientnet': efficientnet_b4(num_classes=10)) with imports/adjusts
-        else:
-            raise ValueError(f"Unknown model: {self.model_type}")
 
     def _get_device_specifications(self, device_type: str) -> Dict:
         """Get realistic specifications for different IoT device types"""
@@ -653,6 +643,13 @@ class IoTDevice:
                 total = 0
                 with torch.no_grad():
                     for X, y in self.test_dataloader:
+                        if self.dataset_name == "NSL-KDD" and (
+                            "conv" in str(type(self.model)).lower()
+                            or "resnet" in self.model_type
+                            or "mobile" in self.model_type
+                        ):
+                            X = nn.functional.pad(X, (0, 128 - X.shape[1]))
+                            X = X.view(X.size(0), 1, 16, 8)
                         pred = self.model(X)
                         total_loss += loss_fn(pred, y).item() * len(y)
                         correct += (pred.argmax(1) == y).sum().item()
@@ -687,6 +684,17 @@ class IoTDevice:
             for index, (X, y) in enumerate(
                 tqdm(self.train_dataloader, desc="Local Training", leave=False)
             ):
+
+                if self.dataset_name == "NSL-KDD" and (
+                    "conv" in str(type(self.model)).lower()
+                    or "resnet" in self.model_type
+                    or "mobile" in self.model_type
+                ):
+                    # Pad to square-ish (e.g., 122 -> 128=16x8; add channel)
+                    X = nn.functional.pad(
+                        X, (0, 128 - X.shape[1])
+                    )  # Pad last dim to 128
+                    X = X.view(X.size(0), 1, 16, 8)  # [batch, 1, H, W]
                 pred = self.model(X)
                 loss = loss_fn(pred, y)
                 optimizer.zero_grad()
@@ -1247,7 +1255,7 @@ class Gateway:
         selection_policy: str,
         mocs_manager: MultiObjectiveClientSelection,
     ) -> List[IoTDevice]:
-        if selection_policy == "random":
+        if selection_policy == "vanilla-fl":
             S = [d for d in devices]
             if not S:
                 return []
@@ -1256,7 +1264,7 @@ class Gateway:
             for dev in selected:
                 dev.selection_count += 1
             return selected
-        elif selection_policy == "moo":
+        elif "moo" in selection_policy:
             return mocs_manager.multi_objective_selection(
                 devices=[d for d in devices if d.can_participate()], selection_size=K
             )
@@ -1288,8 +1296,9 @@ class Gateway:
 
 # %%
 class CloudServer:
-    def __init__(self, server_dataset: DataLoader):
-        self.global_model = FashionMNISTWithConv()
+    def __init__(self, server_dataset: DataLoader, dataset_name: str, global_model):
+        self.dataset_name = dataset_name
+        self.global_model = global_model
         self.dataloader: DataLoader = server_dataset
 
     def get_global_weights(self):
@@ -1305,7 +1314,7 @@ class CloudServer:
             ).mean(0)
         self.global_model.load_state_dict(avg_state)
 
-    def global_model_eval(self):
+    def global_model_eval(self, model_type: str):
         if self.dataloader is None:
             print("No local dataset for tests at the server level")
             return  # Skip if not set
@@ -1317,6 +1326,9 @@ class CloudServer:
             for index, (X, y) in enumerate(
                 tqdm(self.dataloader, desc="Global model Evaluation", leave=False)
             ):
+                if self.dataset_name == "NSL-KDD":
+                    X = nn.functional.pad(X, (0, 128 - X.shape[1]))
+                    X = X.view(X.size(0), 1, 16, 8)
                 pred = self.global_model(X)
                 total_loss += loss_fn(pred, y).item() * len(y)
                 all_preds.extend(pred.argmax(1).cpu().numpy())
@@ -1346,7 +1358,6 @@ class Simulation:
         model_type="cnn",
         optimizer_type="adam",
         dataset_name="FashionMNIST",
-        weights_config: Dict = None,  # Adaptive objective functions weights
         broadcast_mode: str = "all_active",
     ):
         self.cloud: CloudServer
@@ -1364,11 +1375,163 @@ class Simulation:
         self.model_type = model_type
         self.optimizer_type = optimizer_type
         self.dataset_name = dataset_name
-        self.weights_config = weights_config
         self.broadcast_mode = broadcast_mode
 
     def load_dataset(self):
         transform = transforms.Compose([transforms.ToTensor()])
+        if self.dataset_name == "NSL-KDD":
+            # Load/preprocess (files: KDDTrain+.txt, KDDTest+.txt - download to ./data/NSL-KDD/)
+            columns = (
+                "duration",
+                "protocol_type",
+                "service",
+                "flag",
+                "src_bytes",
+                "dst_bytes",
+                "land",
+                "wrong_fragment",
+                "urgent",
+                "hot",
+                "num_failed_logins",
+                "logged_in",
+                "num_compromised",
+                "root_shell",
+                "su_attempted",
+                "num_root",
+                "num_file_creations",
+                "num_shells",
+                "num_access_files",
+                "num_outbound_cmds",
+                "is_host_login",
+                "is_guest_login",
+                "count",
+                "srv_count",
+                "serror_rate",
+                "srv_serror_rate",
+                "rerror_rate",
+                "srv_rerror_rate",
+                "same_srv_rate",
+                "diff_srv_rate",
+                "srv_diff_host_rate",
+                "dst_host_count",
+                "dst_host_srv_count",
+                "dst_host_same_srv_rate",
+                "dst_host_diff_srv_rate",
+                "dst_host_same_src_port_rate",
+                "dst_host_srv_diff_host_rate",
+                "dst_host_serror_rate",
+                "dst_host_srv_serror_rate",
+                "dst_host_rerror_rate",
+                "dst_host_srv_rerror_rate",
+                "label",
+                "difficulty",
+            )
+            # Group labels to 5 classes (normal + 4 attack types)
+            attack_map = {
+                "normal": "normal",
+                # DoS
+                "back": "DoS",
+                "land": "DoS",
+                "neptune": "DoS",
+                "pod": "DoS",
+                "smurf": "DoS",
+                "teardrop": "DoS",
+                "apache2": "DoS",
+                "udpstorm": "DoS",
+                "processtable": "DoS",
+                "worm": "DoS",
+                "mailbomb": "DoS",
+                # Probe
+                "ipsweep": "Probe",
+                "nmap": "Probe",
+                "portsweep": "Probe",
+                "satan": "Probe",
+                "mscan": "Probe",
+                "saint": "Probe",
+                # R2L
+                "ftp_write": "R2L",
+                "guess_passwd": "R2L",
+                "imap": "R2L",
+                "multihop": "R2L",
+                "phf": "R2L",
+                "spy": "R2L",
+                "warezclient": "R2L",
+                "warezmaster": "R2L",
+                "sendmail": "R2L",
+                "named": "R2L",
+                "snmpgetattack": "R2L",
+                "snmpguess": "R2L",
+                "xlock": "R2L",
+                "xsnoop": "R2L",
+                "httptunnel": "R2L",
+                # U2R
+                "buffer_overflow": "U2R",
+                "loadmodule": "U2R",
+                "perl": "U2R",
+                "rootkit": "U2R",
+                "ps": "U2R",
+                "sqlattack": "U2R",
+                "xterm": "U2R",
+            }
+
+            train_df = pd.read_csv(
+                "./data/NSL-KDD/KDDTrain+.txt", names=columns, header=None
+            )
+            test_df = pd.read_csv(
+                "./data/NSL-KDD/KDDTest+.txt", names=columns, header=None
+            )
+
+            # Drop difficulty
+            train_df = train_df.drop("difficulty", axis=1)
+            test_df = test_df.drop("difficulty", axis=1)
+
+            train_df["label"] = train_df["label"].map(attack_map)
+            test_df["label"] = (
+                test_df["label"].map(attack_map).fillna("unknown")
+            )  # Rare unknown in test
+
+            # Combine for full train_dataset (use train_df for splitting; test_df for global eval if needed)
+            # full_df = pd.concat([train_df, test_df], ignore_index=True)
+            full_df = train_df
+
+            # Preprocess for train
+            cat_cols = ["protocol_type", "service", "flag"]
+            num_cols = [
+                col for col in full_df.columns if col not in cat_cols + ["label"]
+            ]
+            enc = OneHotEncoder(sparse_output=False, handle_unknown="ignore")
+            scaler = MinMaxScaler()
+            le = LabelEncoder()
+
+            cat_encoded_train = enc.fit_transform(train_df[cat_cols])
+            num_scaled_train = scaler.fit_transform(train_df[num_cols])
+            labels_train = le.fit_transform(train_df["label"])
+            processed_train = np.hstack((num_scaled_train, cat_encoded_train))
+
+            # Preprocess test_df separately (fit on train, transform test)
+            cat_encoded_test = enc.transform(test_df[cat_cols])
+            num_scaled_test = scaler.transform(test_df[num_cols])
+            labels_test = le.transform(
+                test_df["label"]
+            )  # May have 'unknown'—handle as extra class or drop
+            processed_test = np.hstack((num_scaled_test, cat_encoded_test))
+
+            # To torch Dataset (custom for tabular)
+            class TabularDataset(torch.utils.data.Dataset):
+                def __init__(self, data, labels):
+                    self.data = torch.tensor(data, dtype=torch.float32)
+                    self.labels = torch.tensor(labels, dtype=torch.long)
+
+                def __len__(self):
+                    return len(self.data)
+
+                def __getitem__(self, idx):
+                    return self.data[idx], self.labels[idx]
+
+            train_dataset = TabularDataset(processed_train, labels_train)
+
+            test_dataset = TabularDataset(processed_test, labels_test)
+
         if self.dataset_name == "FashionMNIST":
             train_dataset = datasets.FashionMNIST(
                 root="./data", train=True, download=True, transform=transform
@@ -1385,12 +1548,22 @@ class Simulation:
             )
         # Add CIFAR-10 or IDS later (e.g., for CIFAR: add Normalize, change channels in model)
         self.cloud = CloudServer(
-            server_dataset=DataLoader(test_dataset, batch_size=32, shuffle=True)
+            server_dataset=DataLoader(test_dataset, batch_size=32, shuffle=True),
+            global_model=self.get_model(),
+            dataset_name=self.dataset_name,
         )
+
+        self.train_dataset = train_dataset
+        self.test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
         return train_dataset, test_dataset
 
     def split_non_iid(self, train_dataset, alpha=0.5):
-        labels = np.array(train_dataset.targets)
+        if self.dataset_name == "NSL-KDD":
+            labels = np.array(train_dataset.labels)  # Your TabularDataset attr
+        else:
+            labels = np.array(train_dataset.targets)  # Torchvision
+
+        # labels = np.array(train_dataset.targets)
         class_priors = np.random.dirichlet(
             [alpha] * len(np.unique(labels)), size=self.num_devices
         )
@@ -1432,6 +1605,8 @@ class Simulation:
                 location=locations[i],
                 model_type=self.model_type,
                 optimizer_type=self.optimizer_type,
+                dataset_name=self.dataset_name,
+                model=self.get_model(),
             )
             device.dp_enabled = self.dp_enabled
             full_subset = Subset(train_dataset, client_indices[i])
@@ -1441,12 +1616,8 @@ class Simulation:
                 )
                 device.train_dataset = Subset(full_subset, train_idx)
                 device.test_dataset = Subset(full_subset, test_idx)
-                device.train_dataloader = DataLoader(
-                    device.train_dataset, batch_size=8, shuffle=True
-                )
-                device.test_dataloader = DataLoader(
-                    device.test_dataset, batch_size=8, shuffle=False
-                )
+                device.train_dataloader = DataLoader(device.train_dataset, shuffle=True)
+                device.test_dataloader = DataLoader(device.test_dataset, shuffle=False)
                 device.compute_data_quality()
             self.devices.append(device)
             self.gateway.add_device(device)
@@ -1517,15 +1688,90 @@ class Simulation:
         plt.savefig(save_path)
         plt.close()
 
-    def init_simulator(self, policy: str = "random"):
+    def print_dataset_stats(self, dataset_name):
+        total_train = (
+            len(self.train_dataset)
+            if hasattr(self, "train_dataset")
+            else sum(len(d.train_dataset) for d in self.devices)
+        )
+        total_test = len(self.test_loader.dataset)
+
+        per_device_train = [len(d.train_dataset) for d in self.devices]
+        per_device_test = [len(d.test_dataset) for d in self.devices]
+
+        stats = {
+            "Metric": [
+                "Total Train Samples",
+                "Total Test Samples",
+                "Per-Device Train (Avg/Min/Max)",
+                "Per-Device Test (Avg/Min/Max)",
+            ],
+            "Value": [
+                total_train,
+                total_test,
+                f"{np.mean(per_device_train):.2f} / {np.min(per_device_train)} / {np.max(per_device_train)}",
+                f"{np.mean(per_device_test):.2f} / {np.min(per_device_test)} / {np.max(per_device_test)}",
+            ],
+        }
+        df = pd.DataFrame(stats)
+        print(f"Dataset Stats for {dataset_name}:\n{df.to_string(index=False)}")
+
+    def get_model(self):
+        if self.dataset_name == "NSL-KDD":
+            input_size = 122  # Post one-hot (3+70+11=84 cat + 38 num ≈122)
+            num_classes = 5
+        else:  # MNIST/Fashion
+            input_size = 28 * 28  # Flatten if needed, but conv uses 1x28x28
+            num_classes = 10
+
+        if self.model_type == "cnn":
+            if self.dataset_name == "NSL-KDD":
+                # Tabular FC
+                return nn.Sequential(
+                    nn.Linear(input_size, 128),
+                    nn.ReLU(),
+                    nn.Linear(128, 64),
+                    nn.ReLU(),
+                    nn.Linear(64, num_classes),
+                )
+            else:
+                return FashionMNISTWithConv()  # Existing conv
+        elif self.model_type == "mobilenet":
+            model = mobilenet_v2(num_classes=num_classes, pretrained=False)
+            if self.dataset_name == "NSL-KDD":
+                # Replace first conv with 1D (or reshape in forward)
+                model.features[0][0] = nn.Conv1d(
+                    1, 32, kernel_size=3, stride=2, padding=1, bias=False
+                )  # 1D for tabular seq
+            else:
+                model.features[0][0] = nn.Conv2d(
+                    1, 32, kernel_size=3, stride=2, padding=1, bias=False
+                )  # Grayscale
+            return model
+        elif self.model_type == "resnet18":
+            model = resnet18(num_classes=num_classes, pretrained=False)
+            if self.dataset_name == "NSL-KDD":
+                model.conv1 = nn.Conv1d(
+                    1, 64, kernel_size=7, stride=2, padding=3, bias=False
+                )  # 1D
+            else:
+                model.conv1 = nn.Conv2d(
+                    1, 64, kernel_size=7, stride=2, padding=3, bias=False
+                )
+            return model
+        else:
+            raise ValueError(f"Unknown model: {self.model_type}")
+
+    def init_simulator(self, policy: str = "vanilla-fl"):
         # Init/Reinit the network per run
         self.devices: List[IoTDevice] = []
-        # Or 'hybrid'
-        self.mocs_manager = MultiObjectiveClientSelection(
-            alpha=0.5,
-            gamma=0.5,  # From PDF
-            weights_config=self.weights_config,
-        )
+        if "moo" in policy:
+            method = "hybrid" if "ema" in policy else "ml_model"
+            weights_config = {"method": method, "eta": 0.1}
+            self.mocs_manager = MultiObjectiveClientSelection(
+                alpha=0.5, gamma=0.5, weights_config=weights_config
+            )
+
         self.gateway = Gateway()
         self.metrics[policy] = {
             "avg_battery": [],
@@ -1556,10 +1802,11 @@ class Simulation:
         else:
             client_indices = self.split_non_iid(train_dataset)
         self.assign_to_devices(train_dataset, client_indices)
+        self.print_dataset_stats(self.dataset_name)
         self.plot_data_distribution()
         self.initial_total_battery = sum(d.battery.initial_level for d in self.devices)
 
-    def run(self, policy: str = "random"):
+    def run(self, policy: str = "vanilla-fl"):
         self.init_simulator(policy=policy)
 
         network_alive = True
@@ -1621,9 +1868,9 @@ class Simulation:
                 devices=alive_devices,
                 K=self.K,
                 selection_policy=policy,
-                mocs_manager=self.mocs_manager,
+                mocs_manager=self.mocs_manager if "moo" in policy else None,
             )
-            if selected_clients and policy == "moo":
+            if selected_clients and "moo" in policy:
                 # Compute normalized for final C_sel
                 normalized = self.mocs_manager.objective_function.calculate_all_objectives_with_normalization(
                     alive_devices, [selected_clients]
@@ -1642,7 +1889,7 @@ class Simulation:
                 self.metrics[policy]["objectives"]["energy_eff"].append(
                     normalized["energy_efficiency"]
                 )
-            elif policy == "moo":
+            elif "moo" in policy:
                 # Zero/NaN placeholders if no selection
                 for obj in self.metrics[policy]["objectives"]:
                     self.metrics[policy]["objectives"][obj].append(0)
@@ -1689,7 +1936,9 @@ class Simulation:
             self.cloud.aggregate_updates(local_updates)
 
             # Evaluate on cloud's global (full ML metrics)
-            acc, avg_loss, prec, recall, f1, support = self.cloud.global_model_eval()
+            acc, avg_loss, prec, recall, f1, support = self.cloud.global_model_eval(
+                model_type=self.model_type
+            )
 
             self.metrics[policy]["global_acc"].append(acc)
             self.metrics[policy]["global_loss"].append(avg_loss)
@@ -1749,6 +1998,9 @@ class Simulation:
             self.metrics[policy]["energy_efficiency"].append(eff)
 
             # Network death condition: less than K active devices
+            print(
+                f"Round {round_num}: Alive {len(alive_devices)}, Avg Stability {np.mean([d.bandwidth.connection_stability for d in self.devices]):.2f}, Min Stability {np.min([d.bandwidth.connection_stability for d in self.devices]):.2f}"
+            )
             if len(alive_devices) < self.K:
                 print(f" - NETWORK DEATH (only {len(alive_devices)} devices active)")
                 network_alive = False
@@ -1762,7 +2014,7 @@ class Simulation:
         """Record metrics for initial round or network death situations"""
         # Initial global eval (round 0)
         acc, avg_loss, prec, recall, f1, _ = (
-            self.cloud.global_model_eval()
+            self.cloud.global_model_eval(model_type=self.model_type)
             if network_alive
             else (
                 self.metrics[policy]["global_acc"][-1],
@@ -1813,7 +2065,7 @@ class Simulation:
         self.metrics[policy]["energy_efficiency"].append(eff)
 
         # Zero/NaN placeholders if no selection
-        if policy == "moo":
+        if "moo" in policy:
             if "objectives" not in self.metrics[policy]:
                 self.metrics[policy].update(
                     {
@@ -1844,28 +2096,29 @@ sim = Simulation(
     num_rounds=20,
     num_devices_per_round=10,
     alpha=0.5,
-    distribution="non_iid",
-    dp_enabled=True,
-    model_type="cnn",
-    optimizer_type="adam",
-    dataset_name="FashionMNIST",
-    weights_config={"method": "hybrid", "eta": 0.05},  # 'ml_model' or 'hybrid'
+    distribution="iid",  # 'iid' or 'non_iid'
+    dp_enabled=True,  # 'True' or 'False'
+    model_type="cnn",  # 'cnn' or 'mobilenet' or 'resnet18'
+    optimizer_type="adam",  # 'adam' or 'sdg'
+    dataset_name="MNIST",  # 'MNIST' or 'FashionMNIST' or 'NSL-KDD'
     broadcast_mode="all_active",
 )
-for policy in ["moo", "random", "greedy"]:
+for policy in ["vanilla-fl", "greedy", "moo-ema", "moo-ml"]:
     sim.run(policy=policy)
 
 
 # %%
 def plot_metrics(metrics, num_rounds, K, num_devices):
-    rounds = list(range(20 + 1))
+    # rounds = list(range(20 + 1))
     fig, axs = plt.subplots(5, 2, figsize=(18, 30))  # Expand for new plots
     policies = list(metrics.keys())
     colors_styles = {
-        "moo": ("b", "^-"),
-        "random": ("r", "o-"),
+        "moo": ("b", "o-"),
+        "vanilla-fl": ("c", "d-"),
+        "moo-ema": ("b", "^-"),
+        "moo-ml": ("m", "p-"),
         "greedy": ("g", "s-"),
-    }  # Differentiate: MOO solid blue, random dashed red,greedy
+    }
 
     # Avg Battery: Shows mean % across alive devices; drops as depletion rises
     for policy in policies:
@@ -2063,7 +2316,7 @@ def plot_metrics(metrics, num_rounds, K, num_devices):
     plt.savefig("battery_distribution.png")
 
     # Battery Distrib: Boxplot of levels at key rounds; shows variance/heterogeneity
-    fig_bd, ax_bd = plt.subplots(1, 3, figsize=(18, 4))
+    fig_bd, ax_bd = plt.subplots(1, 4, figsize=(18, 4))
 
     for idx, policy in enumerate(policies):
         policy_len = len(metrics[policy]["battery_distribs"])
@@ -2084,7 +2337,7 @@ def plot_metrics(metrics, num_rounds, K, num_devices):
     fig_bd.savefig("battery_distribution.png")
 
     # Separate fig for full ML metrics: Acc, Loss, Prec, Recall, F1 over rounds
-    fig_ml, ax_ml = plt.subplots(1, 3, figsize=(18, 5))
+    fig_ml, ax_ml = plt.subplots(1, 4, figsize=(18, 5))
     for idx, policy in enumerate(policies):
         policy_rounds = list(range(len(metrics[policy]["global_acc"])))
         ax_ml[idx].plot(
